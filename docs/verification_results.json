@@ -1,0 +1,82 @@
+{
+  "generated_utc": "2026-10-07T16:06:28.075704+00:00",
+  "platform": "Windows-11-10.0.26100-SP0",
+  "binary_sha256": "8c52e288372fa08ddfb84e638feb62fa77286db6ea6ca22c99a5d691f442f69b",
+  "cpp_tests_passed": 16,
+  "python_tests_passed": 5,
+  "original_integrity": {
+    "original_root": "D:\\codex_talk\\project_1\\project_code\\RRTstarDFPFF_paper_r2_noguidance_20261006",
+    "checked_files": 219,
+    "changed_or_missing": [],
+    "added": [],
+    "original_unchanged": true
+  },
+  "experiments": {
+    "production_latency_delivery": {
+      "protocol": "latency",
+      "numeric_profile": "float32_production",
+      "df_mode": "paper_r2",
+      "runs": 6,
+      "successes": 6,
+      "timeout": 3.0,
+      "seeds": [
+        41
+      ],
+      "affinity": [
+        0
+      ],
+      "binary_sha256": "8c52e288372fa08ddfb84e638feb62fa77286db6ea6ca22c99a5d691f442f69b",
+      "matches_current_binary": true
+    },
+    "production_anytime_delivery": {
+      "protocol": "anytime",
+      "numeric_profile": "float32_production",
+      "df_mode": "paper_r2",
+      "runs": 6,
+      "successes": 6,
+      "timeout": 2.0,
+      "seeds": [
+        41
+      ],
+      "affinity": [
+        0
+      ],
+      "binary_sha256": "8c52e288372fa08ddfb84e638feb62fa77286db6ea6ca22c99a5d691f442f69b",
+      "matches_current_binary": true
+    },
+    "legacy_r2_smoke": {
+      "protocol": "latency",
+      "numeric_profile": "legacy_mixed",
+      "df_mode": "paper_r2",
+      "runs": 3,
+      "successes": 3,
+      "timeout": 1.0,
+      "seeds": [
+        41
+      ],
+      "affinity": [
+        0
+      ],
+      "binary_sha256": "8c52e288372fa08ddfb84e638feb62fa77286db6ea6ca22c99a5d691f442f69b",
+      "matches_current_binary": true
+    },
+    "legacy_full_smoke": {
+      "protocol": "latency",
+      "numeric_profile": "legacy_mixed",
+      "df_mode": "full_df",
+      "runs": 3,
+      "successes": 3,
+      "timeout": 1.0,
+      "seeds": [
+        41
+      ],
+      "affinity": [
+        0
+      ],
+      "binary_sha256": "8c52e288372fa08ddfb84e638feb62fa77286db6ea6ca22c99a5d691f442f69b",
+      "matches_current_binary": true
+    }
+  },
+  "ubuntu_tested": false,
+  "formal_20_seeds_executed": false
+}

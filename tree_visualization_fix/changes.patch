@@ -1,0 +1,784 @@
+diff --git a/benchmark/production_runner.cpp b/benchmark/production_runner.cpp
+index e4a49e4..8bb9fe1 100644
+--- a/benchmark/production_runner.cpp
++++ b/benchmark/production_runner.cpp
+@@ -3,6 +3,7 @@
+ #include "postprocess/shortcut.h"
+ #include "benchmark/benchmark_result.h"
+ #include "benchmark/benchmark_runner.h"
++#include "benchmark/tree_export.h"
+ #include <fstream>
+ #include <iomanip>
+ #include <iostream>
+@@ -122,6 +123,17 @@ template<class Model> int productionRuns(const PaperDataAdapter& adapter,const Y
+             if(std::isfinite(result.first_solution_time))result.first_solution_time+=setup;
+             for(auto& event:result.best_cost_events)event.first+=setup;
+             raw=planner.path();first=planner.firstPath();
++            // Export after the search timer is frozen, before planner is destroyed.
++            // Visualization I/O failure must not turn a valid plan into a failure.
++            Timer tree_export;
++            try {
++                writeSearchTree<Model::FlatDim == 4 ? 3 : 2>(planner.tree(),
++                    out/("search_tree_"+std::to_string(run)+".json"));
++            } catch (const std::exception& e) {
++                std::cerr << "WARNING: search tree export failed for run=" << run
++                          << ": " << e.what() << std::endl;
++            }
++            result.export_time += tree_export.seconds();
+         }catch(const std::bad_alloc&){
+             result.completed_normally=false;result.termination_reason="safety_limit";
+             result.failure_reason="allocation_failure";result.search_time=search.seconds();
+diff --git a/plot_successful_results_paper.py b/plot_successful_results_paper.py
+index 23e4bac..802fd1e 100644
+--- a/plot_successful_results_paper.py
++++ b/plot_successful_results_paper.py
+@@ -80,6 +80,85 @@ def trajectory_file(case_dir,run,selection):
+     name=f"trajectory_{run}.yaml" if selection=="final" else f"trajectory_{selection}_{run}.yaml"
+     return case_dir/name
+ 
++def read_search_tree(path, position_dim):
++    if not path.is_file():
++        raise ValueError(f"Search tree is absent: {path}. Rebuild and rerun the planner "
++                         "to export it, or omit --show-tree for older results.")
++    tree = json.loads(path.read_text(encoding="utf-8"))
++    if (tree.get("schema_version") != 1 or tree.get("snapshot") != "final"
++            or tree.get("position_dim") != position_dim):
++        raise ValueError(f"Unsupported search tree schema or dimension: {path}")
++    nodes = tree["nodes"]
++    ids = {node["id"] for node in nodes}
++    if len(nodes) != tree["node_count"] or len(ids) != len(nodes):
++        raise ValueError(f"Search tree node count/IDs are inconsistent: {path}")
++    roots = 0
++    for node in nodes:
++        if len(node["position"]) != position_dim or not all(map(math.isfinite, node["position"])):
++            raise ValueError(f"Invalid search tree position: {path}")
++        if node["parent_id"] is None:
++            roots += 1
++            continue
++        coefficients = node["coefficients"]
++        if (node["parent_id"] not in ids or node["parent_id"] == node["id"]
++                or not math.isfinite(node["duration"]) or node["duration"] <= 0
++                or not isinstance(node["normalized"], bool)
++                or len(coefficients) != position_dim
++                or any(len(c) != 4 or not all(map(math.isfinite, c)) for c in coefficients)):
++            raise ValueError(f"Invalid search tree edge: {path}")
++    if nodes and roots != 1:
++        raise ValueError(f"Search tree must have one root: {path}")
++    return tree
++
++
++def sample_tree_edge(node, samples):
++    import numpy as np
++    # Coefficients are ascending powers of s=t/T (or t for non-normalized edges).
++    parameter = np.linspace(0, 1 if node["normalized"] else node["duration"], samples)
++    coefficients = np.asarray(node["coefficients"], dtype=float)
++    points = np.zeros((samples, len(coefficients)))
++    for column in coefficients.T[::-1]:
++        points = points * parameter[:, None] + column
++    return points
++
++
++def draw_search_tree(axis, tree, samples=33):
++    import numpy as np
++    from matplotlib.collections import LineCollection
++    from mpl_toolkits.mplot3d.art3d import Line3DCollection
++    is_3d = tree["position_dim"] == 3
++    collection_type = Line3DCollection if is_3d else LineCollection
++    segments = []
++    first_collection = True
++
++    def flush():
++        nonlocal first_collection
++        if not segments:
++            return
++        collection = collection_type(
++            list(segments), colors="#7a8695", linewidths=0.55, alpha=0.32, zorder=1,
++            label="final search tree" if first_collection else "_nolegend_")
++        if is_3d:
++            axis.add_collection3d(collection)
++        else:
++            axis.add_collection(collection)
++        first_collection = False
++        segments.clear()
++
++    # Batch artists, but never subsample or drop edges of the retained tree.
++    for node in tree["nodes"]:
++        if node["parent_id"] is not None:
++            segments.append(sample_tree_edge(node, samples))
++        if len(segments) == 4096:
++            flush()
++    flush()
++    if tree["nodes"]:
++        positions = np.array([node["position"] for node in tree["nodes"]])
++        axis.scatter(*positions.T, s=2, color="#7a8695", alpha=0.35,
++                     zorder=1, label="tree nodes")
++    axis.autoscale_view()
++
++
+ def official_scene(axis,case,source,manifest):
+     import yaml
+     module_name,viewer_name = (("unicycle1_viewer","Unicycle1Viewer") if case.startswith("uni_") else
+@@ -100,7 +179,8 @@ def official_scene(axis,case,source,manifest):
+     viewer.view_problem(axis, environment)
+     return viewer
+ 
+-def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",source=None,manifest=None):
++def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",source=None,manifest=None,
++              show_tree=False,tree_samples=33):
+     import matplotlib.pyplot as plt
+ 
+     trajectory = read_simple_yaml(trajectory_file(case_dir,run,selection))
+@@ -135,11 +215,16 @@ def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",
+     state_dim = len(trajectory["states"][0])
+     positions = [state[:3] for state in trajectory["states"]]
+     is_3d = state_dim == 13
++    tree = read_search_tree(case_dir/f"search_tree_{run}.json", 3 if is_3d else 2) if show_tree else None
+     figure = plt.figure(figsize=(9, 7))
+     if is_3d:
+         axis = figure.add_subplot(111, projection="3d")
++        if tree is not None:
++            # Keep the selected path readable above a dense 3D tree background.
++            axis.computed_zorder = False
+         #if mode=="dynobench": official_scene(axis,case_dir.name,source,manifest)
+         if mode == "dynobench":viewer = official_scene(axis, case_dir.name, source, manifest)
++        if tree is not None: draw_search_tree(axis, tree, tree_samples)
+         axis.plot(
+             [point[0] for point in positions],
+             [point[1] for point in positions],
+@@ -147,6 +232,7 @@ def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",
+             color="#1167c4",
+             linewidth=2,
+             label="sampled SIMD path",
++            zorder=3,
+         )
+         # A sphere union is the authoritative geometry. The center cloud is
+         # deliberately used instead of replacing it with the old FCL boxes.
+@@ -166,12 +252,14 @@ def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",
+         axis = figure.add_subplot(111)
+         #if mode=="dynobench": official_scene(axis,case_dir.name,source,manifest)
+         if mode == "dynobench":viewer = official_scene(axis, case_dir.name, source, manifest)
++        if tree is not None: draw_search_tree(axis, tree, tree_samples)
+         axis.plot(
+             [point[0] for point in positions],
+             [point[1] for point in positions],
+             color="#1167c4",
+             linewidth=2,
+             label="sampled SIMD path",
++            zorder=3,
+         )
+         for center, radius in spheres:
+             axis.add_patch(
+@@ -201,13 +289,13 @@ def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",
+             viewer.view_state(axis, states[idx])
+     start, goal = positions[0], positions[-1]
+     if is_3d:
+-        axis.scatter(*start, color="#168a45", s=45, label="start")
+-        axis.scatter(*goal, color="#c83333", marker="*", s=90, label="goal")
++        axis.scatter(*start, color="#168a45", s=45, label="start", zorder=5)
++        axis.scatter(*goal, color="#c83333", marker="*", s=90, label="goal", zorder=5)
+         axis.set_xlabel("x (m)")
+         axis.set_ylabel("y (m)")
+     else:
+-        axis.scatter(start[0], start[1], color="#168a45", s=45, label="start")
+-        axis.scatter(goal[0], goal[1], color="#c83333", marker="*", s=90, label="goal")
++        axis.scatter(start[0], start[1], color="#168a45", s=45, label="start", zorder=5)
++        axis.scatter(goal[0], goal[1], color="#c83333", marker="*", s=90, label="goal", zorder=5)
+         axis.set_xlabel("x (m)")
+     backend = row["validation_backend"]
+     axis.set_title(
+@@ -215,7 +303,9 @@ def draw_case(case_dir, row, run, output_dir,mode="dynobench",selection="final",
+         f"{row.get('numeric_profile', 'float32_production')}\n"
+         f"First solution: {float(row['first_solution_time']):.6f} s\n"
+         f"LQMT Cost J = {trajectory_cost:.6f} | "
+-        f"Path length = {trajectory_length:.6f} m",
++        f"Path length = {trajectory_length:.6f} m"
++        + (f"\nFinal search tree: {tree['node_count']} nodes "
++           f"(not a first-solution snapshot)" if tree is not None else ""),
+         fontsize=11,
+         pad=15
+     )
+@@ -238,7 +328,13 @@ def main():
+     parser.add_argument("--trajectory",choices=("final","raw","shortcut","first","first_shortcut"),default="final")
+     parser.add_argument("--dynobench-source",type=Path)
+     parser.add_argument("--skip-failed",action="store_true")
++    parser.add_argument("--show-tree",action="store_true",
++                        help="Overlay every retained edge/node of the FINAL search tree")
++    parser.add_argument("--tree-samples",type=int,default=33,
++                        help="Display samples per polynomial tree edge (default: 33; no edges dropped)")
+     args = parser.parse_args()
++    if not 2 <= args.tree_samples <= 4096:
++        parser.error("--tree-samples must be between 2 and 4096")
+     manifest_file=args.experiment/"manifest.json"
+     manifest=json.loads(manifest_file.read_text(encoding="utf-8")) if manifest_file.exists() else {}
+     source=args.dynobench_source or Path(manifest.get("dynobench_source","."))
+@@ -271,7 +367,8 @@ def main():
+                 row["cost"] = str(tr["cost"])
+             row["trajectory_duration"]=str(tr["times"][-1]-tr["times"][0])
+             row["path_length"]=str(sum(math.dist(a[:dim],b[:dim]) for a,b in zip(tr["states"],tr["states"][1:])))
+-        image = draw_case(case_dir,row,args.run,args.output,args.mode,args.trajectory,source,manifest)
++        image = draw_case(case_dir,row,args.run,args.output,args.mode,args.trajectory,source,manifest,
++                          args.show_tree,args.tree_samples)
+         images.append(image.name)
+         rows.append(
+             {
+@@ -310,7 +407,9 @@ def main():
+     (args.output/"visualization_manifest.json").write_text(json.dumps(dict(
+         display_mode=args.mode,trajectory=args.trajectory,dynobench_source=str(source),
+         collision_geometry="sphere_union",continuous_collision_certified=False,
+-        official_viewer=args.mode=="dynobench"),indent=2),encoding="utf-8")
++        official_viewer=args.mode=="dynobench",show_tree=args.show_tree,
++        tree_snapshot="final" if args.show_tree else None,
++        tree_samples_per_edge=args.tree_samples if args.show_tree else None),indent=2),encoding="utf-8")
+     for row in rows:
+         print(
+             f"{row['environment']}: first_solution={row['first_solution_time_s']} s | "
+diff --git a/run_three_stage.sh b/run_three_stage.sh
+index 174e478..94645bf 100644
+--- a/run_three_stage.sh
++++ b/run_three_stage.sh
+@@ -1,141 +1,105 @@
+ #!/usr/bin/env bash
+-# One 120-second RRT* run per case; export and draw
+-# (1) first raw, (2) first + shortcut, (3) 120s + shortcut.
+-# Requires enable_three_stage.py patch and rebuilt benchmark.
++# One anytime search per case; plot successful runs even after partial failures.
+ set -o pipefail
+ 
+ main() {
+-    local project_dir="${PROJECT_DIR:-/home/cxt/MYFILE/newfile/RRTstar/RRTstarDFPFF_paper_r2_float32_strict_20261007}"
+-    local dynobench_dir="${DYNOBENCH_DIR:-/home/cxt/MYFILE/newfile/dynobench-main}"
+-    local build_dir
+-    local exp_dir
+-    local run_status
++    local script_dir project_dir dynobench_dir build_dir python exp_dir
++    local run_status=0 plot_status=0 status kind dest case yaml
++    local budget="${SEARCH_SECONDS:-120}" seed="${SEED:-20}"
+     local -a cases=(uni_bugtrap uni_wall quad2d_bugtrap quad2d_hole quad3d_block quad3d_window)
+-    local -a pff_args=()
+-
++    script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)" || return 1
++    project_dir="${PROJECT_DIR:-$script_dir}"
++    dynobench_dir="${DYNOBENCH_DIR:-$project_dir/../dynobench-main}"
++    python="${PYTHON_BIN:-python3}"
++    build_dir="${BUILD_DIR:-}"
+     if [[ ! -d "$project_dir" ]]; then
+-        echo "ERROR: project directory missing: $project_dir"
+-        return 1
++        echo "ERROR: project directory missing: $project_dir"; return 1
+     fi
++    project_dir="$(cd -- "$project_dir" && pwd)" || return 1
+     if [[ ! -d "$dynobench_dir/envs" && -d "$dynobench_dir/dynobench-main/envs" ]]; then
+         dynobench_dir="$dynobench_dir/dynobench-main"
+     fi
+-    if [[ ! -d "$dynobench_dir/envs" ]]; then
+-        echo "ERROR: DynoBench envs directory missing: $dynobench_dir/envs"
++    if [[ ! -d "$dynobench_dir/envs" || ! -f "$dynobench_dir/dynobench/utils/viewer/robot_viewer.py" ]]; then
++        echo "ERROR: DYNOBENCH_DIR must contain envs/ and dynobench/utils/viewer/robot_viewer.py"
+         return 1
+     fi
+-    if [[ ! -f "$dynobench_dir/dynobench/utils/viewer/robot_viewer.py" ]]; then
+-        echo "ERROR: DynoBench viewer missing: $dynobench_dir/dynobench/utils/viewer/robot_viewer.py"
+-        return 1
++    dynobench_dir="$(cd -- "$dynobench_dir" && pwd)" || return 1
++    if [[ -z "$build_dir" ]]; then
++        for build_dir in "$project_dir/build" "$project_dir/build_float32" "$project_dir/build_ubuntu_float32"; do
++            [[ -f "$build_dir/CMakeCache.txt" ]] && break
++        done
+     fi
+-    if [[ -f "$project_dir/build/CMakeCache.txt" ]]; then
+-        build_dir="$project_dir/build"
+-    elif [[ -f "$project_dir/build_float32/CMakeCache.txt" ]]; then
+-        build_dir="$project_dir/build_float32"
+-    else
+-        echo "ERROR: Could not find configured CMake build directory"
++    if [[ ! -f "$build_dir/CMakeCache.txt" ]]; then
++        echo "ERROR: configure CMake first, or set BUILD_DIR to a configured build directory"
+         return 1
+     fi
+-    if ! grep -q 'trajectory_first_shortcut_' "$project_dir/benchmark/production_runner.cpp"; then
+-        echo "ERROR: First apply the enable_three_stage.py patch to your project."
+-        return 1
++    build_dir="$(cd -- "$build_dir" && pwd)" || return 1
++    command -v "$python" >/dev/null || { echo "ERROR: Python not found: $python"; return 1; }
++    if ! grep -q 'search_tree_' "$project_dir/benchmark/production_runner.cpp"; then
++        echo "ERROR: Install the search-tree export changes before running this script"; return 1
+     fi
+-
+-    export PYTHONNOUSERSITE=1
+-    unset PYTHONPATH PYTHONHOME
+-
+-    echo "========== Compile modified benchmark =========="
++    # Current run_six.py loads these presets, even with --protocol anytime.
++    for case in "${cases[@]}"; do
++        yaml="$project_dir/benchmark/config/$case.yaml"
++        if [[ ! -f "$yaml" ]]; then
++            echo "ERROR: Missing configuration: $yaml"; return 1
++        fi
++        echo "PFF preset $case: $(grep 'additional_time_samples:' "$yaml")"
++    done
++    echo "========== Compile benchmark =========="
+     cmake --build "$build_dir" --target benchmark -j 4 || return $?
+-
+-    # New versions accept CLI PFF options; the user's earlier local version does not.
+-    if /usr/bin/python3 -s "$project_dir/tools/run_six.py" --help 2>&1 | grep -q -- '--additional-time-samples'; then
+-        pff_args=(--time-policy candidate_set --additional-time-samples 12)
+-        echo "PFF duration: candidate_set + 12 (command-line override)"
++    exp_dir="${OUTPUT_DIR:-$project_dir/results/three_stage_$(date +%Y%m%d_%H%M%S_%N)}"
++    echo "========== Run six cases ($budget seconds each; seed $seed) =========="
++    echo "Result directory: $exp_dir"
++    if "$python" "$project_dir/tools/run_six.py" \
++        --dynobench-source "$dynobench_dir" --build-dir "$build_dir" \
++        --df-mode paper_r2 --protocol anytime --cases "${cases[@]}" \
++        --runs 1 --seed "$seed" --timeout "$budget" \
++        --shortcut true --shortcut-mode cost_decreasing --shortcut-time optimal \
++        --output "$exp_dir"; then
++        run_status=0
+     else
+-        echo "PFF duration: old runner; checking the six anytime YAML presets"
+-        local case yaml
+-        for case in "${cases[@]}"; do
+-            yaml="$project_dir/benchmark/config/anytime/$case.yaml"
+-            if [[ ! -f "$yaml" ]]; then
+-                echo "ERROR: Missing YAML $yaml"
+-                return 1
+-            fi
+-            if ! grep -Eq '^[[:space:]]+additional_time_samples:[[:space:]]*12([[:space:]]*(#.*)?)?$' "$yaml"; then
+-                echo "ERROR: $yaml does not specify additional_time_samples: 12"
+-                return 1
+-            fi
+-            if grep -Eq '^[[:space:]]+time_policy:' "$yaml" && \
+-               ! grep -Eq '^[[:space:]]+time_policy:[[:space:]]*candidate_set([[:space:]]*(#.*)?)?$' "$yaml"; then
+-                echo "ERROR: $yaml must use time_policy: candidate_set"
+-                return 1
+-            fi
+-        done
++        run_status=$?
++        # Respect an explicit interruption rather than starting extra work.
++        if (( run_status == 130 || run_status == 143 )); then return "$run_status"; fi
++        echo "WARNING: planner exited $run_status; drawing available successful trajectories."
+     fi
+-
+-    exp_dir="$project_dir/results/three_stage_$(date +%Y%m%d_%H%M%S_%N)"
+-    echo "========== Run six cases (one seed per case, 120 s each) =========="
+-    echo "Result directory: $exp_dir"
+-    /usr/bin/python3 -s "$project_dir/tools/run_six.py" \
+-        --dynobench-source "$dynobench_dir" \
+-        --build-dir "$build_dir" \
+-        --df-mode paper_r2 \
+-        --protocol anytime \
+-        --cases "${cases[@]}" \
+-        --runs 1 \
+-        --seed 20 \
+-        --timeout 180 \
+-        --shortcut true \
+-        --shortcut-mode cost_decreasing \
+-        --shortcut-time optimal \
+-        "${pff_args[@]}" \
+-        --output "$exp_dir"
+-    run_status=$?
+-    if (( run_status != 0 )); then
+-        echo "ERROR: Planner returned $run_status. Inspect logs in $exp_dir"
+-        return "$run_status"
++    if [[ ! -d "$exp_dir" ]]; then
++        echo "No experiment directory was created; nothing to draw."
++        if (( run_status != 0 )); then return "$run_status"; fi
++        return 1
+     fi
+-
+-    echo "========== Draw three trajectories =========="
+-    cd "$project_dir" || return 1
+-    local kind dest
++    echo "========== Draw successful trajectories and final search tree =========="
+     for kind in first first_shortcut shortcut; do
+         case "$kind" in
+             first) dest="$exp_dir/figures_01_first_raw" ;;
+             first_shortcut) dest="$exp_dir/figures_02_first_shortcut" ;;
+             shortcut) dest="$exp_dir/figures_03_anytime_shortcut" ;;
+         esac
+-        /usr/bin/python3 -s plot_successful_results_paper.py \
+-            --experiment "$exp_dir" \
+-            --dynobench-source "$dynobench_dir" \
+-            --trajectory "$kind" \
+-            --run 0 \
+-            --mode dynobench \
+-            --skip-failed \
+-            --output "$dest" || return $?
+-        echo "Figure: $dest/index.html"
++        if MPLBACKEND=Agg "$python" "$project_dir/plot_successful_results_paper.py" \
++            --experiment "$exp_dir" --dynobench-source "$dynobench_dir" \
++            --trajectory "$kind" --run 0 --mode dynobench \
++            --skip-failed --show-tree --output "$dest"; then
++            if [[ -f "$dest/index.html" ]]; then
++                echo "Figure: $dest/index.html"
++            else
++                echo "No successful trajectories available for $kind."
++            fi
++        else
++            status=$?
++            if (( status == 130 || status == 143 )); then return "$status"; fi
++            (( plot_status == 0 )) && plot_status=$status
++            echo "WARNING: plotting $kind failed ($status); continuing with other versions."
++        fi
+     done
+-
+     echo "========== Summary =========="
+-    cat "$exp_dir/summary.csv"
+-    /usr/bin/python3 - "$exp_dir" <<'PY'
+-import csv, re, sys
+-from pathlib import Path
+-root=Path(sys.argv[1])
+-print(f'{"case":18} {"J_first":>13} {"J_first_SC":>13} {"J_120s_SC":>13} {"rewires":>10}')
+-for name in ('uni_bugtrap','uni_wall','quad2d_bugtrap','quad2d_hole','quad3d_block','quad3d_window'):
+-    d=root/name
+-    with (d/'results.csv').open(newline='',encoding='utf-8') as f:
+-        row=next(csv.DictReader(f))
+-    fsc=d/'trajectory_first_shortcut_0.yaml'
+-    if fsc.exists():
+-        m=re.search(r'(?m)^cost:\s*([^\s#]+)',fsc.read_text(encoding='utf-8'))
+-        jfsc=float(m.group(1)) if m else float('nan')
+-    else: jfsc=float('nan')
+-    print(f'{name:18} {float(row["first_solution_cost"]):13.5f} {jfsc:13.5f} {float(row["shortcut_cost"]):13.5f} {row["rewires"]:>10}')
+-PY
+-    echo "Done. Three figure sets under: $exp_dir"
+-    echo "The 120-second search excludes shortcut and image-generation time."
+-    return 0
++    if [[ -f "$exp_dir/summary.csv" ]]; then cat "$exp_dir/summary.csv"; fi
++    echo "Results: $exp_dir"
++    echo "Search budget: $budget s per case; excludes tree export, shortcut and plotting."
++    echo "Planner exit: $run_status; plotting exit: $plot_status"
++    # Keep failure visible to callers, but only AFTER all plots were attempted.
++    if (( run_status != 0 )); then return "$run_status"; fi
++    return "$plot_status"
+ }
+ 
+ main "$@"
+diff --git a/benchmark/tree_export.h b/benchmark/tree_export.h
+new file mode 100644
+index 0000000..431abab
+--- /dev/null
++++ b/benchmark/tree_export.h
+@@ -0,0 +1,60 @@
++#pragma once
++#include <filesystem>
++#include <fstream>
++#include <iomanip>
++#include <limits>
++#include <locale>
++#include <stdexcept>
++
++namespace rrtpff {
++// Serialize the FINAL retained tree, including every off-path branch. Store
++// polynomial coefficients rather than chords or pre-sampled large point arrays.
++// Called only after solve(), while the planner and its parent pointers live.
++template<int PositionDim, class Tree>
++void writeSearchTree(const Tree& tree, const std::filesystem::path& file) {
++    static_assert(PositionDim == 2 || PositionDim == 3);
++    auto temporary = file;
++    temporary += ".tmp";
++    try {
++        std::ofstream out(temporary);
++        out.exceptions(std::ios::failbit | std::ios::badbit);
++        out.imbue(std::locale::classic());
++        out << std::setprecision(std::numeric_limits<double>::max_digits10);
++        out << "{\"schema_version\":1,\"snapshot\":\"final\",\"position_dim\":"
++            << PositionDim << ",\"node_count\":" << tree.size() << ",\"nodes\":[\n";
++        bool comma = false;
++        for (const auto& ptr : tree.nodes()) {
++            const auto& node = *ptr;
++            if (comma) out << ",\n";
++            comma = true;
++            out << "{\"id\":" << node.id << ",\"parent_id\":";
++            if (node.parent) out << node.parent->id; else out << "null";
++            out << ",\"position\":[";
++            const auto position = node.state.output();
++            for (int axis = 0; axis < PositionDim; ++axis)
++                out << (axis ? "," : "") << position(axis);
++            out << "],\"cost\":" << node.cost;
++            if (node.parent) {
++                const auto& edge = node.incoming;
++                out << ",\"duration\":" << edge.T << ",\"normalized\":"
++                    << (edge.normalized ? "true" : "false") << ",\"coefficients\":[";
++                for (int axis = 0; axis < PositionDim; ++axis) {
++                    out << (axis ? ",[" : "[");
++                    for (int k = 0; k < edge.coefficients.cols(); ++k)
++                        out << (k ? "," : "") << edge.coefficients(axis, k);
++                    out << ']';
++                }
++                out << ']';
++            }
++            out << '}';
++        }
++        out << "\n]}\n";
++        out.close();
++        std::filesystem::rename(temporary, file);
++    } catch (...) {
++        std::error_code ignored;
++        std::filesystem::remove(temporary, ignored);
++        throw;
++    }
++}
++} // namespace rrtpff
+diff --git a/tests/test_tree_visualization.py b/tests/test_tree_visualization.py
+new file mode 100644
+index 0000000..0d3de09
+--- /dev/null
++++ b/tests/test_tree_visualization.py
+@@ -0,0 +1,165 @@
++"""Visualization and partial-failure integration tests; fixtures are not robot experiments."""
++import csv
++import importlib.util
++import json
++import os
++from pathlib import Path
++import subprocess
++import sys
++import tempfile
++import unittest
++
++os.environ.setdefault("MPLBACKEND", "Agg")
++PROJECT = Path(__file__).resolve().parents[1]
++spec = importlib.util.spec_from_file_location("plot_results", PROJECT / "plot_successful_results_paper.py")
++plot = importlib.util.module_from_spec(spec)
++spec.loader.exec_module(plot)
++
++
++def tree_fixture(dim):
++    # Final topology has two branches, including a node not on the successful path.
++    coefficients = [[0, 1, 0, 0], [0, 0, 1, 0]]
++    if dim == 3:
++        coefficients.append([0, 0, 0, 1])
++    return dict(schema_version=1, snapshot="final", position_dim=dim, node_count=3,
++                nodes=[dict(id=0, parent_id=None, position=[0]*dim, cost=0),
++                       dict(id=1, parent_id=0, position=[1]*dim, cost=2, duration=2,
++                            normalized=True, coefficients=coefficients),
++                       dict(id=2, parent_id=0, position=[2]*dim, cost=3, duration=1,
++                            normalized=True, coefficients=[[0, 2, 0, 0]]*dim)])
++
++
++def write_case(root, name, dim, success=True):
++    folder = root / name
++    folder.mkdir(parents=True)
++    fields = dict(run=0, seed=20, success=int(success), validation_backend="simd_discrete_float8",
++                  numeric_profile="float32_production", first_solution_time=0.1,
++                  first_solution_cost=2, planning_time=1, path_length=2,
++                  trajectory_duration=2, cost=2)
++    with (folder / "results.csv").open("w", newline="") as stream:
++        writer = csv.DictWriter(stream, fieldnames=fields)
++        writer.writeheader(); writer.writerow(fields)
++    (folder / "search_tree_0.json").write_text(json.dumps(tree_fixture(dim)))
++    state_dim = 13 if dim == 3 else 3
++    states = [[0]*state_dim, [1]*dim+[0]*(state_dim-dim)]
++    for version in ("first", "first_shortcut", "shortcut"):
++        text = "cost: 2\nstates:\n" + "".join(f"  - {s}\n" for s in states) + "times: [0, 2]\n"
++        (folder / f"trajectory_{version}_0.yaml").write_text(text)
++
++
++class TreeVisualization(unittest.TestCase):
++    def test_curved_edges_not_straight_chords(self):
++        import numpy as np
++        for dim in (2, 3):
++            node = tree_fixture(dim)["nodes"][1]
++            samples = plot.sample_tree_edge(node, 3)
++            np.testing.assert_allclose(samples[1], [0.5, 0.25, 0.125][:dim])
++            node["normalized"] = False
++            samples = plot.sample_tree_edge(node, 3)
++            np.testing.assert_allclose(samples[1], [1]*dim)
++
++    def test_all_edges_and_nodes_drawn_in_2d_and_3d(self):
++        import matplotlib.pyplot as plt
++        for dim in (2, 3):
++            fig = plt.figure()
++            axis = fig.add_subplot(111, projection="3d" if dim == 3 else None)
++            plot.draw_search_tree(axis, tree_fixture(dim), samples=5)
++            edges = axis.collections[0]
++            segments = edges._segments3d if dim == 3 else edges.get_segments()
++            self.assertEqual(len(segments), 2)
++            self.assertEqual(len(segments[0]), 5)
++            plt.close(fig)
++
++    def test_missing_or_invalid_tree_is_explicit(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            path = Path(tmp) / "tree.json"
++            with self.assertRaisesRegex(ValueError, "Rebuild and rerun"):
++                plot.read_search_tree(path, 2)
++            data = tree_fixture(2)
++            data["nodes"][1]["parent_id"] = 99
++            path.write_text(json.dumps(data))
++            with self.assertRaisesRegex(ValueError, "Invalid search tree edge"):
++                plot.read_search_tree(path, 2)
++
++    def test_successful_cases_survive_failed_and_missing_cases(self):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            write_case(root, "uni_bugtrap", 2)
++            write_case(root, "uni_wall", 2, success=False)
++            write_case(root, "quad3d_block", 3)
++            out = root / "figures"
++            completed = subprocess.run([sys.executable, str(PROJECT/"plot_successful_results_paper.py"),
++                "--experiment", str(root), "--output", str(out), "--mode", "trajectory_only",
++                "--trajectory", "first", "--skip-failed", "--show-tree"], capture_output=True, text=True)
++            self.assertEqual(completed.returncode, 0, completed.stderr)
++            self.assertTrue((out / "uni_bugtrap.png").is_file())
++            self.assertTrue((out / "quad3d_block.png").is_file())
++            self.assertFalse((out / "uni_wall.png").exists())
++            with (out / "metrics.csv").open() as stream:
++                self.assertEqual(len(list(csv.DictReader(stream))), 2)
++            self.assertIn("Skipped:", completed.stdout)
++
++    def exercise_shell(self, run_status, plot_failure="", build_status=0):
++        with tempfile.TemporaryDirectory() as tmp:
++            root = Path(tmp)
++            source, build, bin_dir = root/"dyno", root/"build", root/"bin"
++            (source/"envs").mkdir(parents=True)
++            (source/"dynobench/utils/viewer").mkdir(parents=True)
++            (source/"dynobench/utils/viewer/robot_viewer.py").touch()
++            build.mkdir(); (build/"CMakeCache.txt").touch()
++            bin_dir.mkdir()
++            cmake = bin_dir/"cmake"
++            cmake.write_text(f"#!/bin/sh\nexit {build_status}\n"); cmake.chmod(0o755)
++            result = root/"results"; result.mkdir()
++            write_case(result, "uni_bugtrap", 2, success=run_status == 2)
++            fake = bin_dir/"python-wrapper"
++            fake.write_text(f"#!{sys.executable}\n" + '''import os, subprocess, sys
++from pathlib import Path
++args = sys.argv[1:]
++if args[0].endswith("run_six.py"):
++    sys.exit(int(os.environ["TEST_RUN_STATUS"]))
++if args[0].endswith("plot_successful_results_paper.py"):
++    kind = args[args.index("--trajectory")+1]
++    with open(os.environ["TEST_CALLS"], "a") as f: f.write(kind+"\\n")
++    if kind == os.environ.get("TEST_PLOT_FAILURE"): sys.exit(7)
++    args[args.index("--mode")+1] = "trajectory_only"
++sys.exit(subprocess.run([sys.executable]+args).returncode)
++''')
++            fake.chmod(0o755)
++            calls = root/"calls"
++            env = dict(os.environ, PROJECT_DIR=str(PROJECT), DYNOBENCH_DIR=str(source),
++                       BUILD_DIR=str(build), OUTPUT_DIR=str(result), PYTHON_BIN=str(fake),
++                       PATH=str(bin_dir)+os.pathsep+os.environ["PATH"], TEST_RUN_STATUS=str(run_status),
++                       TEST_CALLS=str(calls), TEST_PLOT_FAILURE=plot_failure)
++            completed = subprocess.run(["bash", str(PROJECT/"run_three_stage.sh")],
++                                       env=env, text=True, capture_output=True)
++            if not build_status and run_status != 130:
++                self.assertTrue(calls.exists(), completed.stdout + completed.stderr)
++            if build_status or run_status == 130:
++                self.assertFalse(calls.exists())
++            else:
++                self.assertEqual(calls.read_text().splitlines(), ["first", "first_shortcut", "shortcut"])
++                if run_status == 2:
++                    self.assertTrue((result/"figures_03_anytime_shortcut/uni_bugtrap.png").is_file())
++            return completed
++
++    def test_shell_partial_failure_still_plots_and_preserves_status(self):
++        result = self.exercise_shell(2)
++        self.assertEqual(result.returncode, 2, result.stderr)
++
++    def test_shell_plot_failure_does_not_skip_later_versions(self):
++        result = self.exercise_shell(0, plot_failure="first_shortcut")
++        self.assertEqual(result.returncode, 7, result.stderr)
++
++    def test_shell_all_failed_does_not_claim_figure_exists(self):
++        result = self.exercise_shell(1)
++        self.assertEqual(result.returncode, 1, result.stderr)
++        self.assertNotIn("Figure:", result.stdout)
++
++    def test_shell_build_failure_and_interrupt_still_abort(self):
++        self.assertEqual(self.exercise_shell(0, build_status=9).returncode, 9)
++        self.assertEqual(self.exercise_shell(130).returncode, 130)
++
++
++if __name__ == "__main__":
++    unittest.main()
+diff --git a/docs/TREE_VISUALIZATION.md b/docs/TREE_VISUALIZATION.md
+new file mode 100644
+index 0000000..cca8d90
+--- /dev/null
++++ b/docs/TREE_VISUALIZATION.md
+@@ -0,0 +1,87 @@
++# 完整搜索树与部分失败后继续绘图
++
++基于仓库 master 提交 642548e92c4de3678eccf28602241002d351cf82。
++
++## 安装
++
++下载补丁压缩包，解压后，在你自己的项目根目录执行（把补丁路径换成实际路径）：
++
++```bash
++git apply --check /path/to/tree_visualization_fix/changes.patch
++git apply /path/to/tree_visualization_fix/changes.patch
++```
++
++先检查、再应用。如果你本地已修改相同代码，检查可能失败：不要强制覆盖；按压缩包 `files/` 中的对应文件手动合并。没有使用 Git 管理本地副本时，也可以先备份，再将 `files/` 内容按相同相对路径复制进去。
++
++C++ 修改必须重新编译：
++
++```bash
++cmake --build build --target benchmark -j 4
++```
++
++## 一键运行
++
++激活已安装 requirements-viewer.txt 的 Python 环境，再运行：
++
++```bash
++export DYNOBENCH_DIR="/实际路径/dynobench-main"
++export BUILD_DIR="$PWD/build"
++export PYTHON_BIN="$(command -v python3)"
++export SEARCH_SECONDS=120
++bash run_three_stage.sh
++```
++
++也支持 `PROJECT_DIR`、`SEED`（默认 20）和 `OUTPUT_DIR`（必须是新目录）。没有设置 BUILD_DIR 时，依次找 build、build_float32、build_ubuntu_float32。默认搜索预算明确为 120 秒，不含导出、shortcut、绘图。
++
++脚本读取当前 run_six.py 真正使用的 `benchmark/config/<case>.yaml`，打印并保留各场景原有的 additional_time_samples，不把它们强制改成 12。
++
++## 新生成的树数据
++
++每个正常返回的 production 搜索，在 planner 销毁前输出：
++
++```
++results/<实验>/<场景>/search_tree_0.json
++```
++
++保存所有当前保留节点的 ID、最终父节点 ID、位置、累计代价，以及每条实际 PFF 入边的持续时间、归一化标记、多项式系数。包括成功路径之外的分支。根节点没有入边。没有找到目标但搜索正常返回时，也会导出树；本绘图流程仍只画成功轨迹。
++
++导出位于 solve() 后，不进入 search_time，耗时记入 export_time。磁盘导出异常会告警，不把规划成功改写为规划失败；此时 `--show-tree` 会明确报告树文件缺失。
++
++这张树是**搜索结束时的快照**，不是搜索历史中曾经尝试的所有边；被拒绝、被 rewiring 替换或被 prune 删除的旧边不在其中。三阶段图均叠加同一个最终树，标题和图例注明 final search tree，不能把首解图上的背景误认为首解时刻的树。
++
++旧结果目录没有树数据，无法仅用成功轨迹还原整棵树：需要重新运行修改后的 benchmark。
++
++## 手动画树与成功轨迹
++
++```bash
++MPLBACKEND=Agg python3 plot_successful_results_paper.py \
++  --experiment "/实际路径/结果目录" \
++  --dynobench-source "$DYNOBENCH_DIR" \
++  --mode dynobench --trajectory shortcut --run 0 \
++  --show-tree --tree-samples 33 --skip-failed \
++  --output "/实际路径/结果目录/figures_tree_new"
++```
++
++`--trajectory` 可选 first、first_shortcut、raw、shortcut、final。灰色显示树边和节点，蓝色显示当前选中的成功轨迹。二维与三维均支持，Quad3D 只绘空间 xyz，不把 yaw 当空间坐标。
++
++所有保留树边都会绘制，无边数截断。每条 PFF 多项式默认采样 33 点显示，可调整 --tree-samples（2..4096）；它仅控制显示精度，不改变规划或碰撞检查。树很大时文件和绘图开销也会增加。采样画出的曲线是视觉近似，不是新的碰撞验证。
++
++旧结果只画成功轨迹时，省略 `--show-tree`。`--skip-failed` 跳过无 results.csv、所选 run 失败、所选轨迹缺失的场景；不会掩盖缺少 Viewer、损坏树文件等绘图错误。
++
++## 部分失败的退出行为
++
++规划返回非零后，脚本先记录状态，再尝试三组图。某组绘图失败也会继续下一组。最后才返回非零：优先保留规划退出码，否则返回绘图错误码。因此 shell/CI 仍能识别实验失败，同时你能查看已生成的成功图片。
++
++编译或输入检查失败仍立即退出；Ctrl+C（130）和终止信号状态（143）也不会触发后续绘图。没有成功轨迹时不声称生成了 index.html。
++
++例如六个场景中两项失败，脚本最终可能仍返回 2，这是正确行为：请到结果目录查看成功场景的图片，而不是把返回 2 理解成所有图都没有生成。
++
++## 验证
++
++```bash
++python3 -m unittest discover -s tests -p test_tree_visualization.py -v
++python3 -m unittest discover -s tests -p test_run_six.py -v
++bash -n run_three_stage.sh
++```
++
++新测试覆盖二维/三维全部树边绘制、多项式曲线（而非端点直线）、缺失树文件、成功/失败/缺失场景混合、规划非零后继续绘图、绘图失败后继续下一组、全部失败以及构建失败/中断退出。测试中的合成场景不是 DynoBench 六场景实验成绩。

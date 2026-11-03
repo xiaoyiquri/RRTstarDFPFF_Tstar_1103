@@ -1,0 +1,59 @@
+numeric: {profile: legacy_mixed}
+profile: paper_fair
+df:
+  mode: full_df
+# Paper VII-A dynamics profile; RRT* search settings retained, not a FLASK reproduction.
+system: quad3d
+environment: window
+dynobench:
+  model_file: ../../models/paper/quad3d_v0.yaml
+  # Relative to this YAML. tools/run_six.py writes an absolute source path.
+  source: ../../../../dynobench-main/dynobench-main
+  environment_file: quadrotor_v0/window.yaml
+lifting:
+  start: {acceleration: [0, 0, 0], jerk: [0, 0, 0], yaw_rate: 0, yaw_acceleration: 0, yaw_jerk: 0}
+  goal: {acceleration: [0, 0, 0], jerk: [0, 0, 0], yaw_rate: 0, yaw_acceleration: 0, yaw_jerk: 0}
+df_limits: {max_acceleration: .inf, max_angular_acceleration: .inf}
+# Explicit fixed-yaw experiment; widen only as a separate experimental condition.
+sampling:
+  yaw_lower: 0
+  yaw_upper: 0
+  guidance_probability: 0
+planner:
+  timeout: 30.0
+  goal_bias: 0.15
+  range: 1.0
+  rewire_factor: 3.0
+  goal_tolerance: 0.000001
+  max_iterations: 100000
+  max_nodes: 20000
+  prune: false
+  stop_at_first_solution: false
+  rewire_before_first_solution: false
+  explicit_goal_connection: true
+  goal_parent_limit: 16
+  terminal_velocity_hint: false
+pff:
+  R_diagonal: [1, 1, 1, 1]
+  free_terminal_state: true
+  free_terminal_time: true
+  min_time: 0.1
+  max_time: 6.0
+  fixed_time: 2.0
+  additional_time_samples: 12
+  defer_trajectories: true
+simd:
+  pff: true
+  nearest_neighbor: true
+geometry:
+  robot_radius: 0.25
+  obstacle_sphere_cell: 0.1
+  collision_margin: 0.00001
+validation:
+  max_step: 0.005
+  max_samples: 20000
+  endpoint_tolerance: 0.001
+benchmark:
+  runs: 1
+  seed: 40
+  output_directory: ../../../results/full_df_quad3d_window

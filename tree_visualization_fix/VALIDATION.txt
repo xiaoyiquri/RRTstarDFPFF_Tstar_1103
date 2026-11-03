@@ -1,0 +1,10 @@
+Base commit: 642548e92c4de3678eccf28602241002d351cf82
+Compiled benchmark with GCC 13.3, Release, AVX2, strict floating-point settings.
+Python: 8 visualization/failure-flow tests and 5 existing runner tests passed.
+Bash syntax and git diff whitespace checks passed.
+Patch check/application on a clean base checkout passed; all six files byte-match.
+Synthetic empty-map smoke only (not original DynoBench benchmark maps):
+Unicycle: success, 860 nodes / 859 edges, 19 rewires.
+Quad3D: success, 4783 nodes / 4782 edges, 2656 rewires.
+Every exported edge start/end was compared with its final parent/child position.
+Both 2D and 3D PNGs generated. No official DynoBench viewer runtime test performed.

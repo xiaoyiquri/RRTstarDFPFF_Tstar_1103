@@ -1,0 +1,37 @@
+Test project D:/codex_talk/project_1/project_code/RRTstarDFPFF_paper_r2_float32_strict_20261007/build_float32
+      Start  1: pff
+ 1/16 Test  #1: pff ..............................   Passed    0.05 sec
+      Start  2: tree
+ 2/16 Test  #2: tree .............................   Passed    0.04 sec
+      Start  3: rewire_metadata
+ 3/16 Test  #3: rewire_metadata ..................   Passed    0.03 sec
+      Start  4: end_to_end
+ 4/16 Test  #4: end_to_end .......................   Passed    0.15 sec
+      Start  5: df
+ 5/16 Test  #5: df ...............................   Passed    0.06 sec
+      Start  6: dynobench
+ 6/16 Test  #6: dynobench ........................   Passed    0.06 sec
+      Start  7: simd
+ 7/16 Test  #7: simd .............................   Passed    0.07 sec
+      Start  8: search_improvements
+ 8/16 Test  #8: search_improvements ..............   Passed    0.05 sec
+      Start  9: paper_fast
+ 9/16 Test  #9: paper_fast .......................   Passed    0.53 sec
+      Start 10: physical_simd
+10/16 Test #10: physical_simd ....................   Passed    0.07 sec
+      Start 11: sphere_geometry
+11/16 Test #11: sphere_geometry ..................   Passed    0.07 sec
+      Start 12: paper_r2
+12/16 Test #12: paper_r2 .........................   Passed    0.04 sec
+      Start 13: float32
+13/16 Test #13: float32 ..........................   Passed    0.49 sec
+      Start 14: float_physical
+14/16 Test #14: float_physical ...................   Passed    0.03 sec
+      Start 15: termination
+15/16 Test #15: termination ......................   Passed    0.06 sec
+      Start 16: paper_profile
+16/16 Test #16: paper_profile ....................   Passed    0.05 sec
+
+100% tests passed out of 16
+
+Total Test time (real) =   1.93 sec

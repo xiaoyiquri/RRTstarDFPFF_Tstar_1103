@@ -1,0 +1,10 @@
+test_anytime (test_run_six.RunnerPaths.test_anytime) ... ok
+test_default_profile_paths (test_run_six.RunnerPaths.test_default_profile_paths) ... ok
+test_full_df_paths (test_run_six.RunnerPaths.test_full_df_paths) ... ok
+test_independent_ab_switches (test_run_six.RunnerPaths.test_independent_ab_switches) ... ok
+test_legacy_r2 (test_run_six.RunnerPaths.test_legacy_r2) ... ok
+
+----------------------------------------------------------------------
+Ran 5 tests in 1.408s
+
+OK
